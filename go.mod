@@ -15,6 +15,7 @@ require (
 	github.com/gorilla/mux v1.7.2
 	github.com/gorilla/websocket v1.4.0
 	github.com/imdario/mergo v0.3.7 // indirect
+	github.com/mattn/goveralls v0.0.2 // indirect
 	github.com/operator-framework/operator-sdk v0.8.1 // indirect
 	github.com/spf13/cobra v0.0.4
 	github.com/stretchr/testify v1.3.0
