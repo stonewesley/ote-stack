@@ -24,8 +24,8 @@ import (
 	"github.com/spf13/cobra"
 	"k8s.io/klog"
 
-	otev1 "github.com/baidu/ote-stack/pkg/apis/ote/v1"
 	"github.com/baidu/ote-stack/pkg/clusterhandler"
+	"github.com/baidu/ote-stack/pkg/clustermessage"
 	"github.com/baidu/ote-stack/pkg/config"
 	"github.com/baidu/ote-stack/pkg/edgehandler"
 	"github.com/baidu/ote-stack/pkg/k8sclient"
@@ -68,10 +68,10 @@ func NewClusterControllerCommand() *cobra.Command {
 
 	cmd.AddCommand(versionCmd)
 	cmd.PersistentFlags().StringVarP(&parentCluster, "parent-cluster", "p", "", "Cloud tunnel of parent cluster, e.g., 192.168.0.2:8287")
-	cmd.PersistentFlags().StringVarP(&clusterName, "cluster-name", "n", config.ROOT_CLUSTER_NAME, "Current cluster name, must be unique")
+	cmd.PersistentFlags().StringVarP(&clusterName, "cluster-name", "n", config.RootClusterName, "Current cluster name, must be unique")
 	cmd.PersistentFlags().StringVarP(&kubeConfig, "kube-config", "k", "/root/.kube/config", "KubeConfig file path")
 	cmd.PersistentFlags().StringVarP(&tunnelListenAddr, "tunnel-listen", "l", ":8287", "Cloud tunnel listen address, e.g., 192.168.0.3:8287")
-	cmd.PersistentFlags().StringVarP(&remoteShimAddr, "remote-shim-endpoint", "r", "", "remote cluster shim unix sock address, e.g., unix://clustercontroller.sock")
+	cmd.PersistentFlags().StringVarP(&remoteShimAddr, "remote-shim-endpoint", "r", "", "remote cluster shim address, e.g., 192.168.0.4:8262")
 	cmd.PersistentFlags().StringVarP(&helmTillerAddr, "helm-tiller-addr", "t", "", "helm tiller http proxy addr, e.g., 192.168.0.4:8288")
 	fs := cmd.Flags()
 	fs.AddGoFlagSet(flag.CommandLine)
@@ -81,7 +81,7 @@ func NewClusterControllerCommand() *cobra.Command {
 
 // Run runs cluster controller.
 func Run() error {
-	// make client to k8s apiserver if no remote shim avaliable.
+	// make client to k8s apiserver if no remote shim available.
 	var k8sClient oteclient.Interface
 	var err error
 	if remoteShimAddr == "" {
@@ -92,19 +92,20 @@ func Run() error {
 	}
 	// make a channel to broadcast to child.
 	// and regist edge/cluster handler to the channel.
-	edgeToClusterChan := make(chan otev1.ClusterController)
+	edgeToClusterChan := make(chan clustermessage.ClusterMessage)
 	// make a channel to return result from cluster handler to edge handler.
-	clusterToEdgeChan := make(chan otev1.ClusterController)
+	clusterToEdgeChan := make(chan clustermessage.ClusterMessage)
 	// make config for cluster controller.
 	clusterConfig := &config.ClusterControllerConfig{
-		TunnelListenAddr:  tunnelListenAddr,
-		ParentCluster:     parentCluster,
-		ClusterName:       clusterName,
-		K8sClient:         k8sClient,
-		HelmTillerAddr:    helmTillerAddr,
-		RemoteShimAddr:    remoteShimAddr,
-		EdgeToClusterChan: edgeToClusterChan,
-		ClusterToEdgeChan: clusterToEdgeChan,
+		TunnelListenAddr:      tunnelListenAddr,
+		ParentCluster:         parentCluster,
+		ClusterName:           clusterName,
+		ClusterUserDefineName: clusterName,
+		K8sClient:             k8sClient,
+		HelmTillerAddr:        helmTillerAddr,
+		RemoteShimAddr:        remoteShimAddr,
+		EdgeToClusterChan:     edgeToClusterChan,
+		ClusterToEdgeChan:     clusterToEdgeChan,
 	}
 
 	// start edge/cluster handler.

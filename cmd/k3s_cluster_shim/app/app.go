@@ -61,7 +61,8 @@ func NewK3sClusterShimCommand() *cobra.Command {
 	}
 
 	cmd.AddCommand(versionCmd)
-	cmd.PersistentFlags().StringVarP(&shimSock, "listen", "l", "/root/clustershim.sock", "Sock of ClusterShim")
+	cmd.PersistentFlags().StringVarP(&shimSock, "listen", "l",
+		":8262", "Websocket address of ClusterShim")
 	cmd.PersistentFlags().StringVarP(&kubeConfig, "kube-config", "k", "/root/.kube/config", "KubeConfig file path")
 	fs := cmd.Flags()
 	fs.AddGoFlagSet(flag.CommandLine)
@@ -82,7 +83,7 @@ func Run() error {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	s := clustershim.NewShimServer()
-	s.RegisterHandler(otev1.CLUSTER_CONTROLLER_DEST_API, handler.NewK8sHandler(k3sClient))
+	s.RegisterHandler(otev1.ClusterControllerDestAPI, handler.NewK8sHandler(k3sClient))
 
 	go func() {
 		<-signals

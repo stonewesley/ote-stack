@@ -17,43 +17,39 @@ limitations under the License.
 package edgehandler
 
 import (
-	otev1 "github.com/baidu/ote-stack/pkg/apis/ote/v1"
+	"github.com/golang/protobuf/proto"
+	"k8s.io/klog"
+
+	"github.com/baidu/ote-stack/pkg/clustermessage"
 	pb "github.com/baidu/ote-stack/pkg/clustershim/apis/v1"
 )
 
-func pb2ClusterControllerSpec(in *pb.ShimRequest) *otev1.ClusterControllerSpec {
-	return &otev1.ClusterControllerSpec{
-		ParentClusterName: in.ParentClusterName,
-		Destination:       in.Destination,
-		Method:            in.Method,
-		URL:               in.URL,
-		Body:              in.Body,
-	}
-}
-
-func clusterControllerSpec2Pb(spec *otev1.ClusterControllerSpec) *pb.ShimRequest {
-	return &pb.ShimRequest{
-		ParentClusterName: spec.ParentClusterName,
-		Destination:       spec.Destination,
-		Method:            spec.Method,
-		URL:               spec.URL,
-		Body:              spec.Body,
-	}
-}
-
-func clusterControllerStatus2Pb(status *otev1.ClusterControllerStatus) *pb.ShimResponse {
-	return &pb.ShimResponse{
-		Timestamp:  status.Timestamp,
-		StatusCode: int32(status.StatusCode),
-		Body:       status.Body,
-	}
-
-}
-
-func pb2ClusterControllerStatus(in *pb.ShimResponse) *otev1.ClusterControllerStatus {
-	return &otev1.ClusterControllerStatus{
+func pb2SerializedControllerTaskResp(
+	in *pb.ShimResponse) (*pb.MessageHead, []byte) {
+	resp := &clustermessage.ControllerTaskResponse{
 		Timestamp:  in.Timestamp,
-		StatusCode: int(in.StatusCode),
-		Body:       in.Body,
+		StatusCode: in.StatusCode,
+		Body:       []byte(in.Body),
+	}
+	data, err := proto.Marshal(resp)
+	if err != nil {
+		klog.Errorf("transfer shim resp to controller task resp failed: %v", err)
+		return nil, nil
+	}
+	return in.Head, data
+}
+
+func controllerTask2Pb(
+	msg *clustermessage.ClusterMessage, task *clustermessage.ControllerTask) *pb.ShimRequest {
+	return &pb.ShimRequest{
+		ParentClusterName: msg.Head.ParentClusterName,
+		Destination:       task.Destination,
+		Method:            task.Method,
+		URL:               task.URI,
+		Body:              string(task.Body),
+		Head: &pb.MessageHead{
+			MessageID:         msg.Head.MessageID,
+			ParentClusterName: msg.Head.ParentClusterName,
+		},
 	}
 }

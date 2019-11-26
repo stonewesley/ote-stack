@@ -23,26 +23,27 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// CLUSTER_STATUS_REGIST describe a cluster registed status,
-// should be set to Cluster.Spec.Status if a cluster've registed.
+// ClusterStatusRegist describe a cluster registered status,
+// should be set to Cluster.Spec.Status if a cluster've registered.
 const (
-	CLUSTER_STATUS_REGIST = "regist"
+	ClusterStatusRegist = "regist"
 )
 
-// CLUSTER_CONTROLLER_DEST_* describe the way to process ClusterController,
+// ClusterControllerDest* describe the way to process ClusterController,
 // should be set to ClusterController.Spec.Destination.
 const (
-	CLUSTER_CONTROLLER_DEST_API              = "api"      // sent to k8s apiserver
-	CLUSTER_CONTROLLER_DEST_HELM             = "helm"     // sent to helm
-	CLUSTER_CONTROLLER_DEST_REGIST_CLUSTER   = "regist"   // cluster regist
-	CLUSTER_CONTROLLER_DEST_UNREGIST_CLUSTER = "unregist" // cluster unregist
-	CLUSTER_CONTROLLER_DEST_CLUSTER_ROUTE    = "route"    // cluster route
+	ClusterControllerDestAPI             = "api"      // sent to k8s apiserver
+	ClusterControllerDestHelm            = "helm"     // sent to helm
+	ClusterControllerDestRegistCluster   = "regist"   // cluster regist
+	ClusterControllerDestUnregistCluster = "unregist" // cluster unregist
+	ClusterControllerDestClusterRoute    = "route"    // cluster route
+	ClusterControllerDestClusterSubtree  = "subtree"  // cluster subtree
 )
 
-// CLUSTER_NAMESPACE defines the namespace of k8s crd must be in.
+// ClusterNamespace defines the namespace of k8s crd must be in.
 // CRD out of the namespace won't be watched.
 const (
-	CLUSTER_NAMESPACE = "kube-system"
+	ClusterNamespace = "kube-system"
 )
 
 // +genclient
@@ -57,6 +58,7 @@ type ClusterController struct {
 	Status map[string]ClusterControllerStatus `json:"status"`
 }
 
+// ClusterControllerSpec is specification of a ClusterController.
 type ClusterControllerSpec struct {
 	ParentClusterName string `json:"parentClusterName"`
 
@@ -68,6 +70,7 @@ type ClusterControllerSpec struct {
 	Body string `json:"body"`
 }
 
+// ClusterControllerStatus is status of a ClusterController.
 type ClusterControllerStatus struct {
 	Timestamp  int64  `json:"timestamp"`
 	StatusCode int    `json:"code"`
@@ -76,6 +79,7 @@ type ClusterControllerStatus struct {
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
+// ClusterControllerList is a list of ClusterController.
 type ClusterControllerList struct {
 	metav1.TypeMeta `json:", inline"`
 	metav1.ListMeta `json:"metadata"`
@@ -94,13 +98,16 @@ type Cluster struct {
 	Status ClusterStatus `json:"status"`
 }
 
+// ClusterSpec is specification of a Cluster.
 type ClusterSpec struct {
-	Name   string `json:"name"`
-	Listen string `json:"listen"`
+	Name       string `json:"name"`
+	Listen     string `json:"listen"`
+	ParentName string `json:"parentName"`
 	// Childs describes the relation of cluster name to its websocket listen address.
 	Childs map[string]string `json:"childs"`
 }
 
+// ClusterStatus is status of a Cluster.
 type ClusterStatus struct {
 	Status    string `json:"status"`
 	Timestamp int64  `json:"timestamp"`
@@ -108,6 +115,7 @@ type ClusterStatus struct {
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
+// ClusterList is a list of Cluster.
 type ClusterList struct {
 	metav1.TypeMeta `json:", inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`

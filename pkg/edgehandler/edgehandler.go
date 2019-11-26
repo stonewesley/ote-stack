@@ -23,10 +23,13 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/golang/protobuf/proto"
 	"k8s.io/klog"
 
-	otev1 "github.com/baidu/ote-stack/pkg/apis/ote/v1"
+	"github.com/baidu/ote-stack/pkg/clustermessage"
+	clusterrouter "github.com/baidu/ote-stack/pkg/clusterrouter"
 	"github.com/baidu/ote-stack/pkg/clusterselector"
+	"github.com/baidu/ote-stack/pkg/clustershim"
 	"github.com/baidu/ote-stack/pkg/config"
 	"github.com/baidu/ote-stack/pkg/tunnel"
 )
@@ -41,7 +44,7 @@ type EdgeHandler interface {
 type edgeHandler struct {
 	conf       *config.ClusterControllerConfig
 	edgeTunnel tunnel.EdgeTunnel
-	shimClient shimServiceClient
+	shimClient clustershim.ShimServiceClient
 }
 
 // NewEdgeHandler returns a edgeHandler object.
@@ -50,7 +53,7 @@ func NewEdgeHandler(c *config.ClusterControllerConfig) EdgeHandler {
 }
 
 func (e *edgeHandler) valid() error {
-	if e.conf.ClusterName == "" {
+	if e.conf.ClusterUserDefineName == "" {
 		return fmt.Errorf("cluster name is empty")
 	}
 	if e.conf.K8sClient == nil && !e.isRemoteShim() {
@@ -63,7 +66,7 @@ func (e *edgeHandler) valid() error {
 }
 
 func (e *edgeHandler) isRoot() bool {
-	return config.IsRoot(e.conf.ClusterName)
+	return config.IsRoot(e.conf.ClusterUserDefineName)
 }
 
 func (e *edgeHandler) isRemoteShim() bool {
@@ -82,18 +85,20 @@ func (e *edgeHandler) Start() error {
 
 	if e.isRemoteShim() {
 		klog.Infof("init remote shim client")
-		e.shimClient = newRemoteShimClient(e.conf.RemoteShimAddr)
+		e.shimClient = clustershim.NewRemoteShimClient(e.conf.RemoteShimAddr)
 	} else {
 		klog.Infof("init local shim client")
-		e.shimClient = newLocalShimClient(e.conf)
+		e.shimClient = clustershim.NewlocalShimClient(e.conf)
 	}
 
 	if e.shimClient == nil {
 		return fmt.Errorf("fail to init shim client")
 	}
 
+	go e.handleRespFromShimClient()
 	e.edgeTunnel = tunnel.NewEdgeTunnel(e.conf)
 	e.edgeTunnel.RegistReceiveMessageHandler(e.receiveMessageFromTunnel)
+	e.edgeTunnel.RegistAfterConnectToHook(e.afterConnect)
 	if err := e.edgeTunnel.Start(); err != nil {
 		return err
 	}
@@ -104,8 +109,8 @@ func (e *edgeHandler) Start() error {
 
 func (e *edgeHandler) sendMessageToTunnel() {
 	for {
-		cc := <-e.conf.ClusterToEdgeChan
-		data, err := cc.Serialize()
+		msg := <-e.conf.ClusterToEdgeChan
+		data, err := proto.Marshal(&msg)
 		if err != nil {
 			continue
 		}
@@ -113,67 +118,111 @@ func (e *edgeHandler) sendMessageToTunnel() {
 	}
 }
 
-func (e *edgeHandler) receiveMessageFromTunnel(client string, message []byte) (ret error) {
+func (e *edgeHandler) receiveMessageFromTunnel(client string, data []byte) (ret error) {
 	ret = nil
-	data, err := otev1.ClusterControllerDeserialize(message)
+	msg := &clustermessage.ClusterMessage{}
+	err := proto.Unmarshal(data, msg)
 	if err != nil {
 		ret = fmt.Errorf("can not deserialize message, error: %s", err.Error())
 		klog.Error(ret)
 		return
 	}
 
-	e.conf.EdgeToClusterChan <- *data
+	e.conf.EdgeToClusterChan <- *msg
 
-	selector := clusterselector.NewSelector(data.Spec.ClusterSelector)
+	selector := clusterselector.NewSelector(msg.Head.ClusterSelector)
 	if selector.Has(e.conf.ClusterName) {
-		e.handleMessage(data)
+		e.handleMessage(msg)
 	}
 
 	return
 }
 
-func responseErrorStatus(err error) *otev1.ClusterControllerStatus {
-	return &otev1.ClusterControllerStatus{
+func responseErrorStatus(err error) []byte {
+	resp := &clustermessage.ControllerTaskResponse{
 		Timestamp:  time.Now().Unix(),
-		Body:       err.Error(),
+		Body:       []byte(err.Error()),
 		StatusCode: http.StatusInternalServerError,
+	}
+	data, err := proto.Marshal(resp)
+	if err != nil {
+		klog.Errorf("marshal controller task resp failed: %v", err)
+		return nil
+	}
+	return data
+}
+
+func (e *edgeHandler) handleMessage(msg *clustermessage.ClusterMessage) error {
+	switch msg.Head.Command {
+	case clustermessage.CommandType_ControlReq:
+		klog.V(1).Infof("dispatch message %v to shim", msg.Head.MessageID)
+		resp, err := e.shimClient.Do(msg)
+		if resp != nil {
+			// sync return
+			if err != nil {
+				resp.Body = responseErrorStatus(err)
+				klog.Errorf("handleTask error: %s", err.Error())
+			}
+
+			resp.Head.ClusterName = e.conf.ClusterName
+			// send to cloudtunnel.
+			err = e.sendToParent(resp)
+		} else {
+			if err != nil {
+				klog.Errorf("handleTask error: %v", err)
+			}
+		}		
+		return err
+	default:
+		klog.Errorf("command %s is not supported by edge handler", msg.Head.Command.String())
+		return nil
 	}
 }
 
-func (e *edgeHandler) handleMessage(c *otev1.ClusterController) error {
-	var (
-		status *otev1.ClusterControllerStatus
-	)
-
-	if c.Spec.Destination == otev1.CLUSTER_CONTROLLER_DEST_REGIST_CLUSTER ||
-		c.Spec.Destination == otev1.CLUSTER_CONTROLLER_DEST_UNREGIST_CLUSTER ||
-		c.Spec.Destination == otev1.CLUSTER_CONTROLLER_DEST_CLUSTER_ROUTE {
-		return nil
+func (e *edgeHandler) handleRespFromShimClient() {
+	// async return
+	if e.shimClient == nil || e.shimClient.ReturnChan() == nil {
+		klog.Warningf("shim client or return chan is nil, cannot handle resp")
+		return
+	}
+	respChan := e.shimClient.ReturnChan()
+	if respChan == nil {
+		klog.Warningf("async return channel from shim client is nil")
+		return
 	}
 
-	// dispatch to target shim.
-	klog.V(1).Infof("dispatch message %v to %s", c, c.Spec.Destination)
-	req := clusterControllerSpec2Pb(&c.Spec)
-	resp, err := e.shimClient.Do(req)
-
-	if err != nil {
-		status = responseErrorStatus(err)
-		klog.Errorf("handleTask error: %s", err.Error())
-	} else {
-		status = pb2ClusterControllerStatus(resp)
+	for {
+		resp := <-respChan
+		
+		resp.Head.ClusterName = e.conf.ClusterName
+        // send to cloudtunnel.
+		e.sendToParent(resp)
 	}
+	klog.Warningf("async return channel from shim client closed")
+}
 
-	// package response message.
-	c.Status = make(map[string]otev1.ClusterControllerStatus)
-	c.Status[e.conf.ClusterName] = *status
+func (e *edgeHandler) afterConnect() {
+	e.reportSubTree()
+}
 
-	// send to cloudtunnel.
-	data, err := c.Serialize()
+func (e *edgeHandler) reportSubTree() {
+	msg := clusterrouter.Router().SubTreeMessage()
+	if msg == nil {
+		return
+	}
+	msg.Head.ClusterName = e.conf.ClusterName
+	e.sendToParent(msg)
+}
+
+func (e *edgeHandler) sendToParent(msg *clustermessage.ClusterMessage) error {
+	data, err := proto.Marshal(msg)
 	if err != nil {
-		klog.Errorf("marshal ClusterController error: %s", err.Error())
+		klog.Errorf("marshal cluster message error: %s", err.Error())
 		return err
 	}
+
 	go e.edgeTunnel.Send(data)
 
 	return nil
 }
+

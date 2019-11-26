@@ -28,12 +28,15 @@ import (
 )
 
 const (
-	writeTimeout = 60
+	WriteTimeout = time.Second * 15
+	ReadTimeout  = time.Second * 15
+	IdleTimeout  = time.Second * 60
+	StopTimeout  = time.Second * 15
 )
 
 // WSClient is a websocket client.
 type WSClient struct {
-	// Name defines client name.
+	// Name defines uuid of the client.
 	Name string
 	// Conn defines websocket connection.
 	Conn  *websocket.Conn
@@ -49,10 +52,13 @@ type ClusterNameChecker func(*config.ClusterRegistry) bool
 type TunnelReadMessageFunc func(string, []byte) error
 
 // ClientCloseHandleFunc is a function to handle wsclient close event.
-type ClientCloseHandleFunc func(string)
+type ClientCloseHandleFunc func(*config.ClusterRegistry)
 
 // AfterConnectHook is a function to handle wsclient connection event.
 type AfterConnectHook func(*config.ClusterRegistry)
+
+// AfterConnectToHook is a function of edge tunnel to call after connection established.
+type AfterConnectToHook func()
 
 // NewWSClient returns a websocket client.
 func NewWSClient(name string, conn *websocket.Conn) *WSClient {
@@ -73,7 +79,7 @@ func (c *WSClient) WriteMessage(msg []byte) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	c.Conn.SetWriteDeadline(time.Now().Add(writeTimeout * time.Second))
+	c.Conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 	if err := c.Conn.WriteMessage(websocket.BinaryMessage, msg); err != nil {
 		klog.Errorf("wsclient %s write msg failed: %s", c.Name, err.Error())
 		return err

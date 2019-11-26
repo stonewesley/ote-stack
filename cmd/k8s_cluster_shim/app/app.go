@@ -62,7 +62,8 @@ func NewK8sClusterShimCommand() *cobra.Command {
 	}
 
 	cmd.AddCommand(versionCmd)
-	cmd.PersistentFlags().StringVarP(&shimSock, "listen", "l", "/root/clustershim.sock", "Sock of ClusterShim")
+	cmd.PersistentFlags().StringVarP(&shimSock, "listen", "l",
+		":8262", "Websocket address of ClusterShim")
 	cmd.PersistentFlags().StringVarP(&kubeConfig, "kube-config", "k", "/root/.kube/config", "KubeConfig file path")
 	cmd.PersistentFlags().StringVarP(&helmConfig, "helm-addr", "", "", "Helm proxy address")
 	fs := cmd.Flags()
@@ -84,9 +85,9 @@ func Run() error {
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	s := clustershim.NewShimServer()
-	s.RegisterHandler(otev1.CLUSTER_CONTROLLER_DEST_API, handler.NewK8sHandler(k8sClient))
+	s.RegisterHandler(otev1.ClusterControllerDestAPI, handler.NewK8sHandler(k8sClient))
 	// TODO directly connect helm tiller.
-	s.RegisterHandler(otev1.CLUSTER_CONTROLLER_DEST_HELM, handler.NewHTTPProxyHandler(helmConfig))
+	s.RegisterHandler(otev1.ClusterControllerDestHelm, handler.NewHTTPProxyHandler(helmConfig))
 
 	go func() {
 		<-signals

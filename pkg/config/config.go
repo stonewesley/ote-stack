@@ -19,43 +19,92 @@ limitations under the License.
 package config
 
 import (
-	otev1 "github.com/baidu/ote-stack/pkg/apis/ote/v1"
+	"encoding/json"
+	"fmt"
+
+	"github.com/baidu/ote-stack/pkg/clustermessage"
 	oteclient "github.com/baidu/ote-stack/pkg/generated/clientset/versioned"
 )
 
 const (
-	// ROOT_CLUSTER_NAME defines the cluster name of root cluster.
-	ROOT_CLUSTER_NAME = "Root"
+	// RootClusterName defines the cluster name of root cluster.
+	RootClusterName = "Root"
 
-	// CLUSTER_CONNECT_HEADER_LISTEN_ADDR defines request header to post listen address of the child.
-	// For edge when connect to parent, set this header to address listend by the cluster,
+	// ClusterConnectHeaderListenAddr defines request header to post listen address of the child.
+	// For edge when connect to parent, set this header to address listened by the cluster,
 	// so let parent know the address of child, thus a cluster can get its neighbor from parent.
-	CLUSTER_CONNECT_HEADER_LISTEN_ADDR = "listen-addr"
+	ClusterConnectHeaderListenAddr = "listen-addr"
+	// ClusterConnectHeaderUserDefineName is the user-define name of the child
+	ClusterConnectHeaderUserDefineName = "name"
 
-	// K8S_INFORMAER_SYNC_DURATION defines k8s informer sync seconds.
-	K8S_INFORMAER_SYNC_DURATION = 10
+	// K8sInformerSyncDuration defines k8s informer sync seconds.
+	K8sInformerSyncDuration = 10
+)
+
+// ErrDuplicatedName is error message format.
+var (
+	ErrDuplicatedName = fmt.Errorf("cluster name duplicated")
 )
 
 // ClusterControllerConfig contains config needed by cluster controller.
 type ClusterControllerConfig struct {
-	TunnelListenAddr  string
-	ParentCluster     string
-	ClusterName       string
-	KubeConfig        string
-	HelmTillerAddr    string
-	RemoteShimAddr    string
-	K8sClient         oteclient.Interface
-	EdgeToClusterChan chan otev1.ClusterController
-	ClusterToEdgeChan chan otev1.ClusterController
+	TunnelListenAddr      string
+	ParentCluster         string
+	ClusterName           string
+	ClusterUserDefineName string
+	KubeConfig            string
+	HelmTillerAddr        string
+	RemoteShimAddr        string
+	K8sClient             oteclient.Interface
+	EdgeToClusterChan     chan clustermessage.ClusterMessage
+	ClusterToEdgeChan     chan clustermessage.ClusterMessage
 }
 
 // ClusterRegistry defines a data structure to use when a cluster regists.
 type ClusterRegistry struct {
-	Name   string
-	Listen string
+	Name           string // uuid
+	UserDefineName string
+	Listen         string
+	Time           int64
+	ParentName     string
+}
+
+// Serialize is for the ClusterRegistry serialization method.
+func (cr *ClusterRegistry) Serialize() ([]byte, error) {
+	b, err := json.Marshal(cr)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+// ClusterRegistryDeserialize is for the ClusterRegistry deserialize.
+func ClusterRegistryDeserialize(b []byte) (*ClusterRegistry, error) {
+	cr := ClusterRegistry{}
+	err := json.Unmarshal(b, &cr)
+	if err != nil {
+		return nil, err
+	}
+	return &cr, nil
+}
+
+// WrapperToClusterMessage is wrapper to ClusterMessage for ClusterRegistry.
+func (cr *ClusterRegistry) WrapperToClusterMessage(
+	command clustermessage.CommandType) (*clustermessage.ClusterMessage, error) {
+	cbyte, err := cr.Serialize()
+	if err != nil {
+		return nil, fmt.Errorf("serialize clusterregistry(%v) failed: %v", cr, err)
+	}
+	msg := &clustermessage.ClusterMessage{
+		Head: &clustermessage.MessageHead{
+			Command: command,
+		},
+		Body: cbyte,
+	}
+	return msg, nil
 }
 
 // IsRoot check if clusterName is a root cluster.
 func IsRoot(clusterName string) bool {
-	return ROOT_CLUSTER_NAME == clusterName
+	return RootClusterName == clusterName
 }

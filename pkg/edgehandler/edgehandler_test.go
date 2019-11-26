@@ -17,19 +17,25 @@ limitations under the License.
 package edgehandler
 
 import (
-	"reflect"
 	"testing"
 	"time"
 
+	"github.com/golang/protobuf/proto"
+	"github.com/stretchr/testify/assert"
+	"k8s.io/klog"
+
 	otev1 "github.com/baidu/ote-stack/pkg/apis/ote/v1"
-	shimv1 "github.com/baidu/ote-stack/pkg/clustershim/apis/v1"
-	"github.com/baidu/ote-stack/pkg/clustershim/handler"
+	"github.com/baidu/ote-stack/pkg/clustermessage"
+	"github.com/baidu/ote-stack/pkg/clustershim"
 	"github.com/baidu/ote-stack/pkg/config"
 	oteclient "github.com/baidu/ote-stack/pkg/generated/clientset/versioned"
 	"github.com/baidu/ote-stack/pkg/tunnel"
 )
 
-var LastSend otev1.ClusterController
+var (
+	edgeTunnelMsg = []byte("msg")
+	LastSend      clustermessage.ClusterMessage
+)
 
 type fakeEdgeTunnel struct {
 }
@@ -37,16 +43,21 @@ type fakeEdgeTunnel struct {
 type fakeShimHandler struct {
 }
 
-func (f *fakeEdgeTunnel) Send(msg []byte) error {
-	cc, err := otev1.ClusterControllerDeserialize(msg)
+func (f *fakeEdgeTunnel) Send(data []byte) error {
+	msg := &clustermessage.ClusterMessage{}
+	err := proto.Unmarshal(data, msg)
 	if err != nil {
 		return err
 	}
-	LastSend = *cc
+	LastSend = *msg
 	return nil
 }
 
 func (f *fakeEdgeTunnel) RegistReceiveMessageHandler(tunnel.TunnelReadMessageFunc) {
+	return
+}
+
+func (f *fakeEdgeTunnel) RegistAfterConnectToHook(tunnel.AfterConnectToHook) {
 	return
 }
 
@@ -58,21 +69,37 @@ func (f *fakeEdgeTunnel) Stop() error {
 	return nil
 }
 
-func (f *fakeShimHandler) Do(in *shimv1.ShimRequest) (*shimv1.ShimResponse, error) {
-	resp := &shimv1.ShimResponse{
-		Timestamp:  time.Now().Unix(),
-		StatusCode: 200,
-		Body:       "",
+func (f *fakeShimHandler) Do(in *clustermessage.ClusterMessage) (*clustermessage.ClusterMessage, error) {
+	head := &clustermessage.MessageHead{
+		MessageID:           in.Head.MessageID,
+		Command:             clustermessage.CommandType_ControlResp,
+		ParentClusterName:   in.Head.ParentClusterName,      
 	}
-	return resp, nil
+
+	resp := &clustermessage.ControllerTaskResponse{
+            Timestamp:  time.Now().Unix(),
+            StatusCode: 200,
+			Body:       []byte(""),
+	}
+
+	data, err := proto.Marshal(resp)		
+    if err != nil {
+		klog.Errorf("shim resp to controller task resp failed: %v", err)
+		return &clustermessage.ClusterMessage{Head: head,}, nil
+	}
+	
+	msg := &clustermessage.ClusterMessage{
+		Head: head,
+		Body: data,
+	}
+
+	return msg, nil
 }
 
-func newFakeShim() shimServiceClient {
-	local := &localShimClient{
-		handlers: make(map[string]handler.Handler),
-	}
-	local.handlers[otev1.CLUSTER_CONTROLLER_DEST_API] = &fakeShimHandler{}
-	return local
+func newFakeShim() clustershim.ShimServiceClient {
+	handlers := clustershim.ShimHandler{}
+	handlers[otev1.ClusterControllerDestAPI] = &fakeShimHandler{}
+	return clustershim.NewlocalShimClientWithHandler(handlers)
 }
 
 func TestValid(t *testing.T) {
@@ -83,19 +110,21 @@ func TestValid(t *testing.T) {
 		{
 			Name: "edgehandler with k8sclient",
 			Conf: &config.ClusterControllerConfig{
-				ClusterName:    "child",
-				K8sClient:      &oteclient.Clientset{},
-				RemoteShimAddr: "",
-				ParentCluster:  "127.0.0.1:8287",
+				ClusterName:           "child",
+				ClusterUserDefineName: "child",
+				K8sClient:             &oteclient.Clientset{},
+				RemoteShimAddr:        "",
+				ParentCluster:         "127.0.0.1:8287",
 			},
 		},
 		{
 			Name: "edgehandler with remoteshim",
 			Conf: &config.ClusterControllerConfig{
-				ClusterName:    "child",
-				K8sClient:      nil,
-				RemoteShimAddr: "/var/run/shim.sock",
-				ParentCluster:  "127.0.0.1:8287",
+				ClusterName:           "child",
+				ClusterUserDefineName: "child",
+				K8sClient:             nil,
+				RemoteShimAddr:        ":8262",
+				ParentCluster:         "127.0.0.1:8287",
 			},
 		},
 	}
@@ -116,7 +145,7 @@ func TestValid(t *testing.T) {
 			Conf: &config.ClusterControllerConfig{
 				ClusterName:    "",
 				K8sClient:      nil,
-				RemoteShimAddr: "/var/run/shim.sock",
+				RemoteShimAddr: ":8262",
 				ParentCluster:  "127.0.0.1:8287",
 			},
 		},
@@ -134,7 +163,7 @@ func TestValid(t *testing.T) {
 			Conf: &config.ClusterControllerConfig{
 				ClusterName:    "child1",
 				K8sClient:      nil,
-				RemoteShimAddr: "/var/run/shim.sock",
+				RemoteShimAddr: ":8262",
 				ParentCluster:  "",
 			},
 		},
@@ -158,7 +187,7 @@ func TestIsRemoteShim(t *testing.T) {
 			Name: "use remote shim",
 			Conf: &config.ClusterControllerConfig{
 				ClusterName:    "child",
-				RemoteShimAddr: "/var/run/shim.sock",
+				RemoteShimAddr: ":8262",
 				K8sClient:      &oteclient.Clientset{},
 			},
 			Expect: true,
@@ -188,23 +217,31 @@ func TestSendMessageToTunnel(t *testing.T) {
 	conf := &config.ClusterControllerConfig{
 		ClusterName:       "child",
 		K8sClient:         nil,
-		RemoteShimAddr:    "/var/run/shim.sock",
+		RemoteShimAddr:    ":8262",
 		ParentCluster:     "127.0.0.1:8287",
-		ClusterToEdgeChan: make(chan otev1.ClusterController),
+		ClusterToEdgeChan: make(chan clustermessage.ClusterMessage),
 	}
+
+	controllerAPITask := &clustermessage.ControllerTask{
+		Destination: "api",
+	}
+	controllerAPITaskData, err := proto.Marshal(controllerAPITask)
+	assert.Nil(t, err)
+	assert.NotNil(t, controllerAPITaskData)
 
 	casetest := []struct {
 		Name     string
-		SendData otev1.ClusterController
+		SendData clustermessage.ClusterMessage
 	}{
 		{
 			Name: "valid send clusterController",
-			SendData: otev1.ClusterController{
-				Spec: otev1.ClusterControllerSpec{
+			SendData: clustermessage.ClusterMessage{
+				Head: &clustermessage.MessageHead{
 					ParentClusterName: "root",
 					ClusterSelector:   "c1,c2",
-					Destination:       "api",
+					Command:           clustermessage.CommandType_ControlReq,
 				},
+				Body: controllerAPITaskData,
 			},
 		},
 	}
@@ -217,9 +254,7 @@ func TestSendMessageToTunnel(t *testing.T) {
 		go edge.sendMessageToTunnel()
 		edge.conf.ClusterToEdgeChan <- ct.SendData
 		time.Sleep(1 * time.Second)
-		if !reflect.DeepEqual(ct.SendData, LastSend) {
-			t.Errorf("[%q] expected %v, got %v", ct.Name, ct.SendData, LastSend)
-		}
+		assert.True(t, proto.Equal(&ct.SendData, &LastSend))
 	}
 }
 
@@ -227,9 +262,9 @@ func TestReceiveMessageFromTunnel(t *testing.T) {
 	conf := &config.ClusterControllerConfig{
 		ClusterName:       "child",
 		K8sClient:         nil,
-		RemoteShimAddr:    "/var/run/shim.sock",
+		RemoteShimAddr:    ":8262",
 		ParentCluster:     "127.0.0.1:8287",
-		EdgeToClusterChan: make(chan otev1.ClusterController, 10),
+		EdgeToClusterChan: make(chan clustermessage.ClusterMessage, 10),
 	}
 
 	edge := &edgeHandler{
@@ -238,57 +273,60 @@ func TestReceiveMessageFromTunnel(t *testing.T) {
 		shimClient: newFakeShim(),
 	}
 
+	controllerAPITask := &clustermessage.ControllerTask{
+		Destination: "api",
+	}
+	controllerAPITaskData, err := proto.Marshal(controllerAPITask)
+	assert.Nil(t, err)
+	assert.NotNil(t, controllerAPITaskData)
+
 	casetest := []struct {
 		Name         string
-		Data         otev1.ClusterController
+		Data         *clustermessage.ClusterMessage
 		ExpectHandle bool
 	}{
 		{
 			Name: "match rule",
-			Data: otev1.ClusterController{
-				Spec: otev1.ClusterControllerSpec{
+			Data: &clustermessage.ClusterMessage{
+				Head: &clustermessage.MessageHead{
 					ParentClusterName: "root",
 					ClusterSelector:   "c1,c2,child",
-					Destination:       "api",
+					Command:           clustermessage.CommandType_ControlReq,
 				},
+				Body: controllerAPITaskData,
 			},
 			ExpectHandle: true,
 		},
 		{
 			Name: "not match rule",
-			Data: otev1.ClusterController{
-				Spec: otev1.ClusterControllerSpec{
+			Data: &clustermessage.ClusterMessage{
+				Head: &clustermessage.MessageHead{
 					ParentClusterName: "root",
 					ClusterSelector:   "c1,c2",
-					Destination:       "api",
+					Command:           clustermessage.CommandType_ControlReq,
 				},
+				Body: controllerAPITaskData,
 			},
 			ExpectHandle: false,
 		},
 	}
 
 	for _, ct := range casetest {
-		LastSend = otev1.ClusterController{}
-		msg, _ := ct.Data.Serialize()
+		LastSend.Head.Command = clustermessage.CommandType_Reserved
+		msg, err := proto.Marshal(ct.Data)
+		assert.Nil(t, err)
 		edge.receiveMessageFromTunnel(conf.ClusterName, msg)
 
-		var broadcast otev1.ClusterController
+		var broadcast clustermessage.ClusterMessage
 		go func() {
 			broadcast = <-edge.conf.EdgeToClusterChan
 		}()
 
 		time.Sleep(1 * time.Second)
 
-		_, ok := LastSend.Status[conf.ClusterName]
-		if ct.ExpectHandle && !ok {
-			t.Errorf("[%q] expected handle msg", ct.Name)
-		} else if !ct.ExpectHandle && ok {
-			t.Errorf("[%q] expected not handle msg", ct.Name)
-		}
-
-		if !reflect.DeepEqual(ct.Data, broadcast) {
-			t.Errorf("[%q] expected %v, got %v", ct.Name, ct.Data, broadcast)
-		}
+		ok := LastSend.Head.Command == clustermessage.CommandType_ControlResp
+		assert.Equal(t, ct.ExpectHandle, ok)
+		assert.True(t, proto.Equal(ct.Data, &broadcast))
 	}
 }
 
@@ -296,9 +334,9 @@ func TestHandleMessage(t *testing.T) {
 	conf := &config.ClusterControllerConfig{
 		ClusterName:       "child",
 		K8sClient:         nil,
-		RemoteShimAddr:    "/var/run/shim.sock",
+		RemoteShimAddr:    ":8262",
 		ParentCluster:     "127.0.0.1:8287",
-		EdgeToClusterChan: make(chan otev1.ClusterController, 10),
+		EdgeToClusterChan: make(chan clustermessage.ClusterMessage, 10),
 	}
 	edge := &edgeHandler{
 		conf:       conf,
@@ -308,66 +346,50 @@ func TestHandleMessage(t *testing.T) {
 
 	casetest := []struct {
 		Name         string
-		Data         otev1.ClusterController
-		ExpectCode   int
+		Data         clustermessage.ClusterMessage
 		ExpectHandle bool
 	}{
 		{
 			Name: "dispatch to route",
-			Data: otev1.ClusterController{
-				Spec: otev1.ClusterControllerSpec{
+			Data: clustermessage.ClusterMessage{
+				Head: &clustermessage.MessageHead{
 					ParentClusterName: "root",
-					Destination:       otev1.CLUSTER_CONTROLLER_DEST_CLUSTER_ROUTE,
+					Command:           clustermessage.CommandType_NeighborRoute,
 				},
 			},
-			ExpectCode:   0,
 			ExpectHandle: false,
 		},
 		{
 			Name: "dispatch to api",
-			Data: otev1.ClusterController{
-				Spec: otev1.ClusterControllerSpec{
+			Data: clustermessage.ClusterMessage{
+				Head: &clustermessage.MessageHead{
 					ParentClusterName: "root",
-					Destination:       otev1.CLUSTER_CONTROLLER_DEST_API,
+					Command:           clustermessage.CommandType_ControlReq,
 				},
 			},
-			ExpectCode:   200,
 			ExpectHandle: true,
 		},
 		{
 			Name: "dispatch to api",
-			Data: otev1.ClusterController{
-				Spec: otev1.ClusterControllerSpec{
+			Data: clustermessage.ClusterMessage{
+				Head: &clustermessage.MessageHead{
 					ParentClusterName: "root",
-					Destination:       otev1.CLUSTER_CONTROLLER_DEST_HELM,
+					Command:           clustermessage.CommandType_ControlReq,
 				},
 			},
-			ExpectCode:   500,
 			ExpectHandle: true,
 		},
 	}
 
 	for _, ct := range casetest {
-		LastSend = otev1.ClusterController{}
+		LastSend.Head.Command = clustermessage.CommandType_Reserved
 		if err := edge.handleMessage(&ct.Data); err != nil {
 			t.Errorf("[%q] unexpected error %v", ct.Name, err)
 		}
 
 		time.Sleep(2 * time.Second)
-		status, ok := LastSend.Status[conf.ClusterName]
-		if !ct.ExpectHandle && ok {
-			t.Errorf("[%q] expected not handle msg", ct.Name)
-		}
-
-		if ct.ExpectHandle {
-			if !ok {
-				t.Errorf("[%q] expected handle msg", ct.Name)
-			} else if status.StatusCode != ct.ExpectCode {
-				t.Errorf("[%q] expected %v, got %v",
-					ct.Name, ct.ExpectCode, status.StatusCode)
-			}
-
-		}
+		ok := LastSend.Head.Command == clustermessage.CommandType_ControlResp
+		assert.Equal(t, ct.ExpectHandle, ok)
 	}
 
 }
